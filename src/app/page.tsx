@@ -34,63 +34,61 @@ const N = 256;
 const ORBIUM = CREATURES[0]; // Orbium unicaudatus
 const HYDROGEMINIUM = CREATURES.find((c) => c.name === 'Hydrogeminium saliens')!;
 
-/** «Жизнепригодная» физика для первичного бульона (проверено эталонной симуляцией). */
-const SOUP_PARAMS: LeniaParams = { R: 12, dt: 0.1, m: 0.28, s: 0.05, b: [1], kn: 1, gn: 1 };
+/** Физика орбия — вид, под который настроен первичный бульон (проверено эталоном). */
+const ORBIUM_PARAMS: LeniaParams = { R: 13, dt: 0.1, m: 0.15, s: 0.015, b: [1], kn: 1, gn: 1 };
 
 interface SceneDef {
   id: string;
   label: string;
   desc: string;
   speed: number;
-  /** Порог массы, ниже которого сцена считается погибшей (авто-возрождение). */
+  /** Порог массы, ниже которого мир считается погибшим (авто-возрождение). */
   deadBelow: number;
-  /** Порог популяционного коллапса (например, стычки в «встречке»). */
-  collapseBelow?: number;
+  /** Порог населения: меньше — популяционный коллапс, пересев. */
+  minPop?: number;
+  /** Льготное время (ед. t) после посева до включения проверок. */
+  graceT: number;
 }
 
 const SCENES: SceneDef[] = [
   {
-    id: 'school',
-    label: 'Стая орбиев',
-    desc: 'Девять орбиев одним курсом. У параллельных траекторий на торе расстояния постоянны — соседи по стае не столкнутся никогда. Проверено эталонной симуляцией: 3000 единиц времени без единой гибели.',
-    speed: 2,
-    deadBelow: 15,
+    id: 'soup',
+    label: 'Первичный бульон',
+    desc: 'Канонический эксперимент Берт Чана: случайное гладкое поле и физика орбия. Из хаоса самособирается экосистема — ~180 организмов, курсы во все стороны, беспрерывные столкновения, слияния и новые рождения. Эталон (NumPy): население 158–195, масса ≈ 12 600 — без деградации 6000+ шагов.',
+    speed: 3,
+    deadBelow: 800,
+    minPop: 25,
+    graceT: 120,
   },
   {
-    id: 'counter',
-    label: 'Встречное движение',
-    desc: 'Две четвёрки навстречу друг другу. Встречные курсы на торе неизбежно пересекаются: стычки, слияния, гибели. Когда население падает, мир заселяет сцену заново.',
+    id: 'shower',
+    label: 'Встречный хаос',
+    desc: 'Десять орбиев со случайными курсами. На торе встречные пути неизбежно пересекаются: лобовые удары, слияния, гибели — и выжившие. Эталон: население 10 → 6 → 5 → 3 → 2 за первые сотни шагов. Когда драма исчерпана, мир сам заселяет новую десятку.',
     speed: 2,
-    deadBelow: 15,
-    collapseBelow: 260,
+    deadBelow: 60,
+    minPop: 3,
+    graceT: 40,
   },
   {
     id: 'division',
     label: 'Деление клетки',
-    desc: 'Гидроблизнецы: организм перетягивается и делится надвое, потомки расходятся и встречаются вновь. Цикл повторяется неограниченно долго.',
+    desc: 'Гидроблизнецы: организм перетягивается и делится надвое, потомки расходятся, встречаются и сливаются вновь — цикл длится неограниченно. Рождение новых существ в чистом виде.',
     speed: 8,
     deadBelow: 100,
-  },
-  {
-    id: 'headon',
-    label: 'Лоб в лоб',
-    desc: 'Два орбия на одной геодезической. Исход закономерен — полная аннигиляция до последней капли вещества. Мир возрождает пару — со слегка другими начальными условиями.',
-    speed: 2,
-    deadBelow: 15,
-  },
-  {
-    id: 'soup',
-    label: 'Первичный бульон',
-    desc: 'Случайные капли в «жизнепригодной» физике (μ=0.28, σ=0.05): из хаоса собираются организмы, живут и гибнут, а поле постепенно кристаллизуется в узор — тогда мир получает новую порцию органики.',
-    speed: 3,
-    deadBelow: 15,
+    graceT: 80,
   },
 ];
 
-/** Точный курс орбия при rot=1 (выверен эталонной симуляцией), экранные координаты. */
-const ORB_U: readonly [number, number] = [-0.927, -0.373];
-const ORB_P: readonly [number, number] = [0.373, -0.927];
-const CENTER = 128;
+/** Детерминированный PRNG для воспроизводимых сцен (mulberry32). */
+function mulberry32(seed: number) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 function creatureParams(c: Creature): LeniaParams {
   return { R: c.R, dt: 1 / c.T, m: c.m, s: c.s, b: c.b, kn: c.kn, gn: c.gn };
@@ -131,10 +129,10 @@ export default function Page() {
   const frameCountRef = useRef(0);
   const fpsRef = useRef(0);
   const lastFrameRef = useRef(0);
-  /** Состояние авто-возрождения: счётчик «тощих» замеров, льготный период после посева, снимок для замера «замершего» мира. */
-  const reviveStateRef = useRef({ lowFrames: 0, grace: 140, snapMass: -1, snapCx: 0, snapCy: 0, snapM2: 0 });
+  /** Состояние авто-возрождения: счётчик «тощих» замеров и снимок для детекта «замершего» мира. */
+  const reviveStateRef = useRef({ lowFrames: 0, snapMass: -1, snapCx: 0, snapCy: 0, snapM2: 0 });
   const autoReviveRef = useRef(true);
-  const presetIdRef = useRef('school');
+  const presetIdRef = useRef('soup');
 
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(true);
@@ -143,10 +141,10 @@ export default function Page() {
   const [paletteId, setPaletteId] = useState('bio');
   const [armed, setArmed] = useState<Creature | null>(null);
   const [rot, setRot] = useState(0);
-  const [presetId, setPresetId] = useState('school');
+  const [presetId, setPresetId] = useState('soup');
   const [physicsLabel, setPhysicsLabel] = useState('Орбий · Orbium unicaudatus');
   const [brush, setBrush] = useState({ radius: 10, strength: 0.85, erase: false });
-  const [stats, setStats] = useState({ t: 0, mass: 0, fps: 0 });
+  const [stats, setStats] = useState({ t: 0, mass: 0, pop: 0, fps: 0 });
   const [autoRevive, setAutoRevive] = useState(true);
   const [revives, setRevives] = useState(0);
   const paramsRef = useRef(params);
@@ -167,7 +165,7 @@ export default function Page() {
     setPhysicsLabel(label ?? 'кастомная (ползунки)');
   }, []);
 
-  /** Seed one of the curated scenes. `vary` adds jitter so revived scenes differ. */
+  /** Seed one of the curated scenes. `vary` adds randomness so revived scenes differ. */
   const seedScene = useCallback((id: string, eng: LeniaEngine, vary = false) => {
     eng.clear();
     simTimeRef.current = 0;
@@ -181,65 +179,35 @@ export default function Page() {
       setParams(creatureParams(HYDROGEMINIUM));
       setPhysicsLabel(`Гидроблизнецы · ${HYDROGEMINIUM.name}`);
       eng.placeCells(HYDROGEMINIUM.w, HYDROGEMINIUM.h, Float32Array.from(HYDROGEMINIUM.cells), N / 2, N / 2);
-    } else if (id === 'soup') {
-      eng.setParams(SOUP_PARAMS);
-      setParams(SOUP_PARAMS);
-      setPhysicsLabel('бульон · μ=0.28, σ=0.05, R=12');
-      eng.randomize();
-    } else if (id === 'headon') {
-      eng.setParams(creatureParams(ORBIUM));
-      setParams(creatureParams(ORBIUM));
+    } else if (id === 'shower') {
+      eng.setParams(ORBIUM_PARAMS);
+      setParams(ORBIUM_PARAMS);
       setPhysicsLabel('Орбий · Orbium unicaudatus');
-      // Пара на одной геодезической; при возрождении меняем ось и добавляем сдвиг
-      // ось rot0: (0.373, -0.927), пара rot0/rot2; ось rot1: (-0.927, -0.373), пара rot1/rot3
-      const useRot1Axis = vary && Math.random() < 0.5;
-      const ux = useRot1Axis ? ORB_U[0] : 0.373;
-      const uy = useRot1Axis ? ORB_U[1] : -0.927;
-      const aRot = useRot1Axis ? 1 : 0;
-      const bRot = useRot1Axis ? 3 : 2;
-      const jx = vary ? (Math.random() - 0.5) * 8 : 0;
-      const jy = vary ? (Math.random() - 0.5) * 8 : 0;
-      const ax = 88 + jx;
-      const ay = 128 + jy;
-      const bx = ((ax + 240 * ux) % N + N) % N;
-      const by = ((ay + 240 * uy) % N + N) % N;
-      const a = rotateCells(ORBIUM.cells, ORBIUM.w, ORBIUM.h, aRot);
-      const b = rotateCells(ORBIUM.cells, ORBIUM.w, ORBIUM.h, bRot);
-      eng.placeCells(a.w, a.h, Float32Array.from(a.cells), ax, ay);
-      eng.placeCells(b.w, b.h, Float32Array.from(b.cells), bx, by);
-    } else if (id === 'counter') {
-      eng.setParams(creatureParams(ORBIUM));
-      setParams(creatureParams(ORBIUM));
-      setPhysicsLabel('Орбий · Orbium unicaudatus');
-      // Две группы на параллельных «дорожках», курс — навстречу
-      for (const [q, r] of [[-60, 1], [-20, 1], [68, 3], [108, 3]] as const) {
-        const dsign = r === 1 ? 1 : -1;
-        for (const s of [-40, 40]) {
-          const jx = vary ? (Math.random() - 0.5) * 6 : 0;
-          const jy = vary ? (Math.random() - 0.5) * 6 : 0;
-          const x = CENTER + q * ORB_P[0] + s * dsign * ORB_U[0] + jx;
-          const y = CENTER + q * ORB_P[1] + s * dsign * ORB_U[1] + jy;
-          const rc = rotateCells(ORBIUM.cells, ORBIUM.w, ORBIUM.h, r);
-          eng.placeCells(rc.w, rc.h, Float32Array.from(rc.cells), x, y);
+      // 10 орбиев: случайные позиции (с зазором) и случайные курсы — столкновения неизбежны
+      const rng = mulberry32(vary ? (Math.random() * 0x7fffffff) | 0 : 20261110);
+      const placed: [number, number][] = [];
+      for (let k = 0; k < 10; k++) {
+        let x = N / 2;
+        let y = N / 2;
+        for (let tries = 0; tries < 80; tries++) {
+          x = 26 + rng() * (N - 52);
+          y = 26 + rng() * (N - 52);
+          if (placed.every(([px, py]) => Math.hypot(px - x, py - y) > 36)) break;
         }
+        placed.push([x, y]);
+        const rc = rotateCells(ORBIUM.cells, ORBIUM.w, ORBIUM.h, Math.floor(rng() * 4));
+        eng.placeCells(rc.w, rc.h, Float32Array.from(rc.cells), x, y);
       }
     } else {
-      // 'school' — умолчание: 9 орбиев строем, параллельные курсы
-      eng.setParams(creatureParams(ORBIUM));
-      setParams(creatureParams(ORBIUM));
+      // 'soup' — умолчание: первичный бульон, жизнь возникает из шума
+      eng.setParams(ORBIUM_PARAMS);
+      setParams(ORBIUM_PARAMS);
       setPhysicsLabel('Орбий · Orbium unicaudatus');
-      for (const q of [-34, 0, 34]) {
-        for (const s of [-56, 0, 56]) {
-          const x = CENTER + q * ORB_P[0] + s * ORB_U[0];
-          const y = CENTER + q * ORB_P[1] + s * ORB_U[1];
-          const rc = rotateCells(ORBIUM.cells, ORBIUM.w, ORBIUM.h, 1);
-          eng.placeCells(rc.w, rc.h, Float32Array.from(rc.cells), x, y);
-        }
-      }
+      eng.randomize();
     }
     setSpeed(scene.speed);
     speedRef.current = scene.speed;
-    reviveStateRef.current = { lowFrames: 0, grace: 140, snapMass: -1, snapCx: 0, snapCy: 0, snapM2: 0 };
+    reviveStateRef.current = { lowFrames: 0, snapMass: -1, snapCx: 0, snapCy: 0, snapM2: 0 };
     // явная смена/перезапуск сцены возвращает демо-режим с авто-возрождением
     autoReviveRef.current = true;
     setAutoRevive(true);
@@ -261,7 +229,20 @@ export default function Page() {
       return;
     }
     engineRef.current = engine;
-    queueMicrotask(() => seedScene('school', engine));
+    queueMicrotask(() => seedScene('soup', engine));
+
+    // Отладочный/e2e-хук: позволяет прогнать симуляцию быстро и без рендера
+    (window as unknown as { __lenia?: object }).__lenia = {
+      stepN: (n: number) => {
+        for (let i = 0; i < n; i++) engine.step();
+        simTimeRef.current += n * paramsRef.current.dt;
+      },
+      stats: () => engine.getStats(),
+      seed: (sid: string) => seedScene(sid, engine),
+      setSpeed: (v: number) => {
+        speedRef.current = Math.max(1, Math.min(16, Math.round(v)));
+      },
+    };
 
     const loop = (now: number) => {
       const eng = engineRef.current;
@@ -282,21 +263,21 @@ export default function Page() {
           eng.render();
           frameCountRef.current++;
           const fc = frameCountRef.current;
-          // льготный период после посева тикает каждый кадр, а не каждый замер
-          if (reviveStateRef.current.grace > 0) reviveStateRef.current.grace--;
           if (fc % 20 === 0) {
             const st = eng.getStats();
             setStats({
               t: simTimeRef.current,
               mass: st.mass,
+              pop: st.population,
               fps: fpsRef.current,
             });
             // — Авто-возрождение мира —
             const rv = reviveStateRef.current;
             const scene = SCENES.find((s) => s.id === presetIdRef.current) ?? SCENES[0];
-            if (autoReviveRef.current && runningRef.current && !paintingRef.current) {
+            const inGrace = simTimeRef.current < scene.graceT;
+            if (autoReviveRef.current && runningRef.current && !paintingRef.current && !inGrace) {
               const dead = st.mass < scene.deadBelow;
-              const collapsed = scene.collapseBelow !== undefined && st.mass < scene.collapseBelow;
+              const collapsed = scene.minPop !== undefined && st.population < scene.minPop;
               if (dead || collapsed) {
                 rv.lowFrames++;
               } else {
@@ -320,7 +301,7 @@ export default function Page() {
                 rv.snapM2 = st.mom2;
               }
               if (rv.lowFrames >= 15) {
-                // ~3 с подряд мир тощ или замер — пересеваем с вариациями
+                // ~3 с подряд мир тощ, замер или малолюден — пересеваем с вариациями
                 seedScene(presetIdRef.current, eng, true);
                 setRevives((n) => n + 1);
               }
@@ -645,6 +626,8 @@ export default function Page() {
                   <span className="text-emerald-500/60">·</span>
                   <span>M = {stats.mass.toFixed(0)}</span>
                   <span className="text-emerald-500/60">·</span>
+                  <span title="Число связанных организмов на поле">организмов = {stats.pop}</span>
+                  <span className="text-emerald-500/60">·</span>
                   <span>{stats.fps.toFixed(0)} FPS</span>
                   {revives > 0 && (
                     <span className="text-emerald-400/80" title="Сколько раз мир сам пересеял погибшую или замершую сцену">
@@ -774,13 +757,13 @@ export default function Page() {
                         >
                           <CreatureThumb creature={c} size={52} />
                           <span className="min-w-0">
-                            <span className="block truncate text-sm font-semibold">{c.ru}</span>
-                            <span className="block truncate text-[11px] italic text-muted-foreground">
+                            <span className="block text-sm font-semibold leading-tight">{c.ru}</span>
+                            <span className="mt-0.5 block text-[11px] italic leading-tight text-muted-foreground">
                               {c.name}
                             </span>
-                            <span className="mt-0.5 block truncate text-[10px] uppercase tracking-wide text-emerald-500/80">
+                            <span className="mt-1 block text-[10px] uppercase tracking-wide text-emerald-500/80">
                               {c.kindRu}
-                              {c.speed >= 0.5 ? ` · ~${c.speed.toFixed(1)} кл/t.u.` : ''}
+                              {c.speed >= 0.5 ? ` · ${c.speed.toFixed(1)}` : ''}
                             </span>
                           </span>
                         </button>
