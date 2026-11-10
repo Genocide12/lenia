@@ -204,7 +204,7 @@ export default function Page() {
         try {
           if (lastFrameRef.current) {
             const dtms = now - lastFrameRef.current;
-            if (dtms > 0 && dtms < 500) {
+            if (dtms > 0 && dtms < 2000) {
               fpsRef.current = fpsRef.current === 0 ? 1000 / dtms : fpsRef.current * 0.9 + (1000 / dtms) * 0.1;
             }
           }
