@@ -24,3 +24,6 @@ tests/
 agent-ctx/
 .env
 .env.*
+
+# sandbox gateway config
+Caddyfile
