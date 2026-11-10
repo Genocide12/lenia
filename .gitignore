@@ -27,3 +27,4 @@ agent-ctx/
 
 # sandbox gateway config
 Caddyfile
+.next-export/

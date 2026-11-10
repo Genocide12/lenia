@@ -282,6 +282,8 @@ export default function Page() {
           eng.render();
           frameCountRef.current++;
           const fc = frameCountRef.current;
+          // льготный период после посева тикает каждый кадр, а не каждый замер
+          if (reviveStateRef.current.grace > 0) reviveStateRef.current.grace--;
           if (fc % 20 === 0) {
             const st = eng.getStats();
             setStats({
@@ -292,9 +294,7 @@ export default function Page() {
             // — Авто-возрождение мира —
             const rv = reviveStateRef.current;
             const scene = SCENES.find((s) => s.id === presetIdRef.current) ?? SCENES[0];
-            if (rv.grace > 0) {
-              rv.grace--;
-            } else if (autoReviveRef.current && runningRef.current && !paintingRef.current) {
+            if (autoReviveRef.current && runningRef.current && !paintingRef.current) {
               const dead = st.mass < scene.deadBelow;
               const collapsed = scene.collapseBelow !== undefined && st.mass < scene.collapseBelow;
               if (dead || collapsed) {

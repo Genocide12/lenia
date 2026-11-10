@@ -10,6 +10,7 @@ const nextConfig: NextConfig = {
         output: "export",
         basePath: `/${REPO_NAME}`,
         images: { unoptimized: true },
+        distDir: ".next-export", // не конфликтует с запущенным next dev
       }
     : { output: "standalone" }),
   typescript: {
