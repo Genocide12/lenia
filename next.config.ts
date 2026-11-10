@@ -1,8 +1,17 @@
 import type { NextConfig } from "next";
 
+/** Статический экспорт для GitHub Pages: EXPORT_STATIC=1 bun run build:static */
+const isExport = process.env.EXPORT_STATIC === "1";
+const REPO_NAME = "lenia";
+
 const nextConfig: NextConfig = {
-  output: "standalone",
-  /* config options here */
+  ...(isExport
+    ? {
+        output: "export",
+        basePath: `/${REPO_NAME}`,
+        images: { unoptimized: true },
+      }
+    : { output: "standalone" }),
   typescript: {
     ignoreBuildErrors: true,
   },

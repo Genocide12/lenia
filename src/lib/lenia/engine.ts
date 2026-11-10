@@ -448,21 +448,21 @@ export class LeniaEngine {
   }
 
   /**
-   * Write a creature pattern into the state, centered at (gx, gy) grid coords,
-   * with toroidal wrap. Screen-up orientation is preserved (rows are flipped
-   * into texture space), uploaded as up to 4 wrapped rectangles.
+   * Write a creature pattern into the state, centered at (gx, gy) grid coords
+   * (gy measured from the BOTTOM of the screen, matching pointer coords),
+   * with toroidal wrap. Pattern row 0 stays at the top of its bounding box.
+   * Uploaded as up to 4 wrapped rectangles.
    */
   placeCells(w: number, h: number, cells: Float32Array, gx: number, gy: number) {
     const N = this.N;
     const gl = this.gl;
-    // row-flipped copy: texture row 0 is the bottom of the screen
+    // src: row 0 = bottom of the pattern (texture row 0 = bottom of the screen)
     const src = new Float32Array(w * h);
     for (let j = 0; j < h; j++) {
       src.set(cells.subarray(j * w, (j + 1) * w), (h - 1 - j) * w);
     }
     const x0 = ((Math.round(gx - w / 2)) % N + N) % N;
-    const yTop = Math.round(gy - h / 2); // screen-space top row
-    const y0 = ((N - (yTop + h)) % N + N) % N; // texture-space top row
+    const y0 = ((Math.round(gy - h / 2)) % N + N) % N; // texture row = screen y-up
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.bindTexture(gl.TEXTURE_2D, this.tex[this.read]);
     const ws = x0 + w <= N ? [w] : [N - x0, w - (N - x0)];
@@ -555,15 +555,33 @@ export class LeniaEngine {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, N, N, gl.RED, gl.FLOAT, flipped);
   }
 
-  /** Total mass (sum of state). Moderately expensive: full readback. */
-  getMass(): number {
+  /** Mass, centroid and variance of the field (texture coords, y-up). Full readback. */
+  getStats(): { mass: number; cx: number; cy: number; mom2: number } {
     const gl = this.gl;
+    const N = this.N;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo[this.read]);
-    gl.readPixels(0, 0, this.N, this.N, gl.RGBA, gl.FLOAT, this.pixelBuf);
+    gl.readPixels(0, 0, N, N, gl.RGBA, gl.FLOAT, this.pixelBuf);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     let sum = 0;
-    for (let i = 0; i < this.pixelBuf.length; i += 4) sum += this.pixelBuf[i];
-    return sum;
+    let sx = 0;
+    let sy = 0;
+    let s2 = 0;
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const a = this.pixelBuf[(y * N + x) * 4];
+        if (a > 0.02) {
+          sum += a;
+          sx += x * a;
+          sy += y * a;
+          s2 += (x * x + y * y) * a;
+        }
+      }
+    }
+    if (sum <= 0) return { mass: 0, cx: 0, cy: 0, mom2: 0 };
+    const cx = sx / sum;
+    const cy = sy / sum;
+    const mom2 = s2 / sum - (cx * cx + cy * cy); // второй момент (разброс массы)
+    return { mass: sum, cx, cy, mom2 };
   }
 
   destroy() {

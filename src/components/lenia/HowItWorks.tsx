@@ -3,6 +3,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
+import { CREATURES } from '@/lib/lenia/creatures';
 
 const LINKS = [
   { label: 'Официальная страница и веб-демо', href: 'https://chakazul.github.io/lenia.html' },
@@ -166,7 +167,7 @@ export function HowItWorks() {
             ))}
             <Separator className="my-2" />
             <p className="px-3 text-xs leading-relaxed text-muted-foreground">
-              Все 13 существ этого демо взяты из оригинальной библиотеки (animals.json)
+              Все {CREATURES.length} существ этого демо взяты из оригинальной библиотеки (animals.json)
               и проверены эталонной симуляцией на NumPy: каждое выживает и сохраняет
               форму при своих параметрах. Orbium, кстати, был открыт 15 апреля 2015 года —
               задолго до публикации.

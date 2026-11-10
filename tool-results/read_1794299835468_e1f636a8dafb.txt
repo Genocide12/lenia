@@ -1,0 +1,842 @@
+     1→'use client';
+     2→
+     3→import { useCallback, useEffect, useRef, useState } from 'react';
+     4→import { Pause, Play, SkipForward, Dices, Trash2, RotateCcw, Brush, Eraser, RotateCcwSquare, RotateCwSquare } from 'lucide-react';
+     5→import { Button } from '@/components/ui/button';
+     6→import { Card } from '@/components/ui/card';
+     7→import { Badge } from '@/components/ui/badge';
+     8→import { Slider } from '@/components/ui/slider';
+     9→import { Label } from '@/components/ui/label';
+    10→import { Switch } from '@/components/ui/switch';
+    11→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    12→import { ScrollArea } from '@/components/ui/scroll-area';
+    13→import {
+    14→  Select,
+    15→  SelectContent,
+    16→  SelectItem,
+    17→  SelectTrigger,
+    18→  SelectValue,
+    19→} from '@/components/ui/select';
+    20→import { CREATURES, type Creature } from '@/lib/lenia/creatures';
+    21→import {
+    22→  LeniaEngine,
+    23→  PALETTES,
+    24→  KERNEL_NAMES,
+    25→  GROWTH_NAMES,
+    26→  type LeniaParams,
+    27→  type Palette,
+    28→} from '@/lib/lenia/engine';
+    29→import { CreatureThumb } from '@/components/lenia/CreatureThumb';
+    30→import { KernelPlot, GrowthPlot } from '@/components/lenia/Plots';
+    31→import { HowItWorks } from '@/components/lenia/HowItWorks';
+    32→
+    33→const N = 256;
+    34→const ORBIUM = CREATURES[0]; // Orbium unicaudatus
+    35→const HYDROGEMINIUM = CREATURES.find((c) => c.name === 'Hydrogeminium saliens')!;
+    36→
+    37→/** «Жизнепригодная» физика для первичного бульона (проверено эталонной симуляцией). */
+    38→const SOUP_PARAMS: LeniaParams = { R: 12, dt: 0.1, m: 0.28, s: 0.05, b: [1], kn: 1, gn: 1 };
+    39→
+    40→interface Preset {
+    41→  id: string;
+    42→  label: string;
+    43→  desc: string;
+    44→}
+    45→
+    46→const PRESETS: Preset[] = [
+    47→  {
+    48→    id: 'meet',
+    49→    label: 'Орбии навстречу',
+    50→    desc: 'Четыре орбия ползут в разные стороны. Столкновения запускают взрыв колонии — дайте сцене минуту.',
+    51→  },
+    52→  {
+    53→    id: 'division',
+    54→    label: 'Деление клетки',
+    55→    desc: 'Гидроблизнецы: тело перетягивается и делится на два организма. На скорости ×8 это занимает считанные секунды.',
+    56→  },
+    57→  {
+    58→    id: 'soup',
+    59→    label: 'Первичный бульон',
+    60→    desc: 'Случайные капли в «жизнепригодной» физике (μ=0.28, σ=0.05): рождаются и гибнут десятки организмов.',
+    61→  },
+    62→  {
+    63→    id: 'headon',
+    64→    label: 'Лоб в лоб',
+    65→    desc: 'Два орбия на одной прямой. Столкновения в Lenia непредсказуемы: существа могут разойтись, слиться или погибнуть.',
+    66→  },
+    67→];
+    68→
+    69→function creatureParams(c: Creature): LeniaParams {
+    70→  return { R: c.R, dt: 1 / c.T, m: c.m, s: c.s, b: c.b, kn: c.kn, gn: c.gn };
+    71→}
+    72→
+    73→/** Rotate a creature pattern by 90° increments (Lenia is rotation-equivariant). */
+    74→function rotateCells(cells: number[], w: number, h: number, quarterTurns: number): { cells: number[]; w: number; h: number } {
+    75→  let cur = cells.slice();
+    76→  let cw = w;
+    77→  let ch = h;
+    78→  for (let t = 0; t < ((quarterTurns % 4) + 4) % 4; t++) {
+    79→    const next = new Array(cw * ch);
+    80→    for (let y = 0; y < ch; y++) {
+    81→      for (let x = 0; x < cw; x++) {
+    82→        next[x * ch + (ch - 1 - y)] = cur[y * cw + x];
+    83→      }
+    84→    }
+    85→    cur = next;
+    86→    const tmp = cw;
+    87→    cw = ch;
+    88→    ch = tmp;
+    89→  }
+    90→  return { cells: cur, w: cw, h: ch };
+    91→}
+    92→
+    93→export default function Page() {
+    94→  const canvasRef = useRef<HTMLCanvasElement>(null);
+    95→  const engineRef = useRef<LeniaEngine | null>(null);
+    96→  const rafRef = useRef<number>(0);
+    97→  const runningRef = useRef(true);
+    98→  const speedRef = useRef(4);
+    99→  const simTimeRef = useRef(0);
+   100→  const armedRef = useRef<Creature | null>(null);
+   101→  const rotRef = useRef(0);
+   102→  const brushRef = useRef({ radius: 10, strength: 0.85, erase: false });
+   103→  const paintingRef = useRef(false);
+   104→  const lastPtRef = useRef<[number, number] | null>(null);
+   105→  const frameCountRef = useRef(0);
+   106→  const fpsRef = useRef(0);
+   107→  const lastFrameRef = useRef(0);
+   108→
+   109→  const [error, setError] = useState<string | null>(null);
+   110→  const [running, setRunning] = useState(true);
+   111→  const [speed, setSpeed] = useState(4);
+   112→  const [params, setParams] = useState<LeniaParams>(() => creatureParams(ORBIUM));
+   113→  const [paletteId, setPaletteId] = useState('bio');
+   114→  const [armed, setArmed] = useState<Creature | null>(null);
+   115→  const [rot, setRot] = useState(0);
+   116→  const [presetId, setPresetId] = useState('meet');
+   117→  const [physicsLabel, setPhysicsLabel] = useState('Орбий · Orbium unicaudatus');
+   118→  const [brush, setBrush] = useState({ radius: 10, strength: 0.85, erase: false });
+   119→  const [stats, setStats] = useState({ t: 0, mass: 0, fps: 0 });
+   120→  const paramsRef = useRef(params);
+   121→
+   122→  const applyParams = useCallback((patch: Partial<LeniaParams>, label?: string) => {
+   123→    setParams((prev) => {
+   124→      const next = { ...prev, ...patch };
+   125→      engineRef.current?.setParams(patch);
+   126→      return next;
+   127→    });
+   128→    setPhysicsLabel(label ?? 'кастомная (ползунки)');
+   129→  }, []);
+   130→
+   131→  /** Seed one of the curated scenes. Returns nothing; resets world + physics. */
+   132→  const seedPreset = useCallback((id: string, eng: LeniaEngine) => {
+   133→    eng.clear();
+   134→    simTimeRef.current = 0;
+   135→    armedRef.current = null;
+   136→    setArmed(null);
+   137→    setRot(0);
+   138→    rotRef.current = 0;
+   139→    if (id === 'division') {
+   140→      eng.setParams(creatureParams(HYDROGEMINIUM));
+   141→      setParams(creatureParams(HYDROGEMINIUM));
+   142→      setPhysicsLabel(`Гидроблизнецы · ${HYDROGEMINIUM.name}`);
+   143→      eng.placeCells(HYDROGEMINIUM.w, HYDROGEMINIUM.h, Float32Array.from(HYDROGEMINIUM.cells), N / 2, N / 2);
+   144→      setSpeed(8);
+   145→      speedRef.current = 8;
+   146→    } else if (id === 'soup') {
+   147→      eng.setParams(SOUP_PARAMS);
+   148→      setParams(SOUP_PARAMS);
+   149→      setPhysicsLabel('бульон · μ=0.28, σ=0.05, R=12');
+   150→      eng.randomize();
+   151→      setSpeed(6);
+   152→      speedRef.current = 6;
+   153→    } else if (id === 'headon') {
+   154→      eng.setParams(creatureParams(ORBIUM));
+   155→      setParams(creatureParams(ORBIUM));
+   156→      setPhysicsLabel('Орбий · Orbium unicaudatus');
+   157→      const a = rotateCells(ORBIUM.cells, ORBIUM.w, ORBIUM.h, 0);
+   158→      const b = rotateCells(ORBIUM.cells, ORBIUM.w, ORBIUM.h, 2);
+   159→      eng.placeCells(a.w, a.h, Float32Array.from(a.cells), 88, N / 2);
+   160→      eng.placeCells(b.w, b.h, Float32Array.from(b.cells), 168, N / 2);
+   161→      setSpeed(4);
+   162→      speedRef.current = 4;
+   163→    } else {
+   164→      // 'meet' — default
+   165→      eng.setParams(creatureParams(ORBIUM));
+   166→      setParams(creatureParams(ORBIUM));
+   167→      setPhysicsLabel('Орбий · Orbium unicaudatus');
+   168→      const spots: Array<[number, number, number]> = [
+   169→        [76, 96, 0],
+   170→        [184, 150, 2],
+   171→        [168, 62, 1],
+   172→        [66, 198, 3],
+   173→      ];
+   174→      for (const [x, y, r] of spots) {
+   175→        const rc = rotateCells(ORBIUM.cells, ORBIUM.w, ORBIUM.h, r);
+   176→        eng.placeCells(rc.w, rc.h, Float32Array.from(rc.cells), x, y);
+   177→      }
+   178→      setSpeed(4);
+   179→      speedRef.current = 4;
+   180→    }
+   181→    setPresetId(id);
+   182→    setRunning(true);
+   183→    runningRef.current = true;
+   184→  }, []);
+   185→
+   186→  // Engine lifecycle + render loop
+   187→  useEffect(() => {
+   188→    const canvas = canvasRef.current;
+   189→    if (!canvas) return;
+   190→    let engine: LeniaEngine;
+   191→    try {
+   192→      engine = new LeniaEngine(canvas, N, creatureParams(ORBIUM), PALETTES[0]);
+   193→    } catch (e) {
+   194→      const msg = e instanceof Error ? e.message : String(e);
+   195→      queueMicrotask(() => setError(msg));
+   196→      return;
+   197→    }
+   198→    engineRef.current = engine;
+   199→    queueMicrotask(() => seedPreset('meet', engine));
+   200→
+   201→    const loop = (now: number) => {
+   202→      const eng = engineRef.current;
+   203→      if (eng) {
+   204→        try {
+   205→          if (lastFrameRef.current) {
+   206→            const dtms = now - lastFrameRef.current;
+   207→            if (dtms > 0 && dtms < 2000) {
+   208→              fpsRef.current = fpsRef.current === 0 ? 1000 / dtms : fpsRef.current * 0.9 + (1000 / dtms) * 0.1;
+   209→            }
+   210→          }
+   211→          lastFrameRef.current = now;
+   212→          if (runningRef.current) {
+   213→            const spd = speedRef.current;
+   214→            for (let i = 0; i < spd; i++) eng.step();
+   215→            simTimeRef.current += spd * paramsRef.current.dt;
+   216→          }
+   217→          eng.render();
+   218→          frameCountRef.current++;
+   219→          if (frameCountRef.current % 20 === 0) {
+   220→            setStats({
+   221→              t: simTimeRef.current,
+   222→              mass: eng.getMass(),
+   223→              fps: fpsRef.current,
+   224→            });
+   225→          }
+   226→        } catch (err) {
+   227→          runningRef.current = false;
+   228→          const msg = err instanceof Error ? err.message : String(err);
+   229→          queueMicrotask(() => {
+   230→            setError(msg);
+   231→            setRunning(false);
+   232→          });
+   233→          return; // stop the loop on error instead of dying silently
+   234→        }
+   235→      }
+   236→      rafRef.current = requestAnimationFrame(loop);
+   237→    };
+   238→    rafRef.current = requestAnimationFrame(loop);
+   239→    return () => {
+   240→      cancelAnimationFrame(rafRef.current);
+   241→      engine.destroy();
+   242→      engineRef.current = null;
+   243→    };
+   244→  }, [seedPreset]);
+   245→
+   246→  useEffect(() => {
+   247→    paramsRef.current = params;
+   248→  }, [params]);
+   249→
+   250→  useEffect(() => {
+   251→    runningRef.current = running;
+   252→  }, [running]);
+   253→  useEffect(() => {
+   254→    speedRef.current = speed;
+   255→  }, [speed]);
+   256→  useEffect(() => {
+   257→    brushRef.current = brush;
+   258→  }, [brush]);
+   259→  useEffect(() => {
+   260→    rotRef.current = rot;
+   261→  }, [rot]);
+   262→
+   263→  // Palette
+   264→  useEffect(() => {
+   265→    const pal = PALETTES.find((p) => p.id === paletteId) ?? PALETTES[0];
+   266→    engineRef.current?.setPalette(pal);
+   267→  }, [paletteId]);
+   268→
+   269→  // Wheel over canvas rotates the armed creature (non-passive to prevent page scroll)
+   270→  useEffect(() => {
+   271→    const cv = canvasRef.current;
+   272→    if (!cv) return;
+   273→    const onWheel = (e: WheelEvent) => {
+   274→      if (!armedRef.current) return;
+   275→      e.preventDefault();
+   276→      setRot((r) => (r + (e.deltaY > 0 ? 90 : -90) + 360) % 360);
+   277→    };
+   278→    cv.addEventListener('wheel', onWheel, { passive: false });
+   279→    return () => cv.removeEventListener('wheel', onWheel);
+   280→  }, []);
+   281→
+   282→  // Keyboard shortcuts
+   283→  useEffect(() => {
+   284→    const onKey = (e: KeyboardEvent) => {
+   285→      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+   286→      if (e.code === 'Space') {
+   287→        e.preventDefault();
+   288→        setRunning((r) => !r);
+   289→      } else if (e.key === 'r' || e.key === 'R' || e.key === 'к' || e.key === 'К') {
+   290→        engineRef.current?.randomize();
+   291→      } else if (e.key === 'c' || e.key === 'C' || e.key === 'с' || e.key === 'С') {
+   292→        engineRef.current?.clear();
+   293→      } else if (e.key === 'q' || e.key === 'Q' || e.key === 'й' || e.key === 'Й') {
+   294→        if (armedRef.current) setRot((r) => (r + 270) % 360);
+   295→      } else if (e.key === 'e' || e.key === 'E' || e.key === 'у' || e.key === 'У') {
+   296→        if (armedRef.current) setRot((r) => (r + 90) % 360);
+   297→      }
+   298→    };
+   299→    window.addEventListener('keydown', onKey);
+   300→    return () => window.removeEventListener('keydown', onKey);
+   301→  }, []);
+   302→
+   303→  const toGrid = (e: React.PointerEvent<HTMLCanvasElement>): [number, number] => {
+   304→    const rect = e.currentTarget.getBoundingClientRect();
+   305→    const gx = ((e.clientX - rect.left) / rect.width) * N;
+   306→    const gy = (1 - (e.clientY - rect.top) / rect.height) * N;
+   307→    return [gx, gy];
+   308→  };
+   309→
+   310→  const paintStroke = (from: [number, number], to: [number, number], erase: boolean) => {
+   311→    const eng = engineRef.current;
+   312→    if (!eng) return;
+   313→    const { radius, strength } = brushRef.current;
+   314→    const dist = Math.hypot(to[0] - from[0], to[1] - from[1]);
+   315→    const steps = Math.max(1, Math.ceil(dist / (radius * 0.5)));
+   316→    for (let i = 0; i <= steps; i++) {
+   317→      const t = i / steps;
+   318→      eng.paint(from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t, radius, strength, erase);
+   319→    }
+   320→  };
+   321→
+   322→  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+   323→    e.currentTarget.setPointerCapture(e.pointerId);
+   324→    const pt = toGrid(e);
+   325→    const c = armedRef.current;
+   326→    if (c) {
+   327→      const rc = rotateCells(c.cells, c.w, c.h, rotRef.current / 90);
+   328→      engineRef.current?.placeCells(rc.w, rc.h, Float32Array.from(rc.cells), pt[0], pt[1]);
+   329→      if (!e.shiftKey) {
+   330→        armedRef.current = null;
+   331→        setArmed(null);
+   332→      }
+   333→      return;
+   334→    }
+   335→    paintingRef.current = true;
+   336→    lastPtRef.current = pt;
+   337→    paintStroke(pt, pt, brushRef.current.erase || e.button === 2);
+   338→  };
+   339→
+   340→  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+   341→    if (!paintingRef.current) return;
+   342→    const pt = toGrid(e);
+   343→    const last = lastPtRef.current ?? pt;
+   344→    paintStroke(last, pt, brushRef.current.erase || e.buttons === 2);
+   345→    lastPtRef.current = pt;
+   346→  };
+   347→
+   348→  const onPointerUp = () => {
+   349→    paintingRef.current = false;
+   350→    lastPtRef.current = null;
+   351→  };
+   352→
+   353→  const armCreature = (c: Creature) => {
+   354→    armedRef.current = c;
+   355→    setArmed(c);
+   356→    setRot(0);
+   357→    rotRef.current = 0;
+   358→    applyParams(creatureParams(c), `${c.ru} · ${c.name}`);
+   359→  };
+   360→
+   361→  const presetDesc = PRESETS.find((p) => p.id === presetId)?.desc ?? '';
+   362→
+   363→  return (
+   364→    <div
+   365→      className="dark flex min-h-screen flex-col text-neutral-100"
+   366→      style={
+   367→        {
+   368→          '--background': '#05090b',
+   369→          '--card': '#0b1210',
+   370→          '--popover': '#0d1512',
+   371→          '--border': 'rgba(255,255,255,0.09)',
+   372→          '--input': 'rgba(255,255,255,0.12)',
+   373→          '--muted': '#101915',
+   374→          '--muted-foreground': '#8ba79a',
+   375→          '--secondary': '#0f1a15',
+   376→          '--secondary-foreground': '#d7efe2',
+   377→          '--accent': '#122019',
+   378→          '--accent-foreground': '#d7efe2',
+   379→          '--primary': '#10b981',
+   380→          '--primary-foreground': '#032015',
+   381→          '--ring': '#10b981',
+   382→        } as React.CSSProperties
+   383→      }
+   384→    >
+   385→      <header className="border-b border-white/5">
+   386→        <div className="mx-auto w-full max-w-7xl px-4 py-8 sm:py-10">
+   387→          <div className="flex flex-wrap items-end justify-between gap-4">
+   388→            <div>
+   389→              <h1 className="bg-gradient-to-r from-emerald-300 via-teal-200 to-lime-200 bg-clip-text text-4xl font-extrabold tracking-tight text-transparent sm:text-6xl">
+   390→                Lenia
+   391→              </h1>
+   392→              <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground sm:text-base">
+   393→                Непрерывная «Жизнь» Конвея: гладкое поле вместо клеток, дифференциальное
+   394→                время вместо тактов — и цифровые организмы, которые ползут, делятся и
+   395→                умирают по-настоящему. Всё считается в вашем браузере (WebGL2).
+   396→              </p>
+   397→            </div>
+   398→            <div className="flex flex-wrap gap-2">
+   399→              <Badge variant="outline" className="border-emerald-800/60 text-emerald-400">
+   400→                256×256 · тор
+   401→              </Badge>
+   402→              <Badge variant="outline" className="border-emerald-800/60 text-emerald-400">
+   403→                14 существ из оригинальной библиотеки
+   404→              </Badge>
+   405→            </div>
+   406→          </div>
+   407→        </div>
+   408→      </header>
+   409→
+   410→      <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:py-8">
+   411→        {error ? (
+   412→          <Card className="border-destructive/40 p-6">
+   413→            <p className="font-medium text-destructive">Симуляция остановлена из-за ошибки</p>
+   414→            <p className="mt-2 text-sm text-muted-foreground">{error}</p>
+   415→          </Card>
+   416→        ) : (
+   417→          <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_370px]">
+   418→            {/* Canvas column */}
+   419→            <div>
+   420→              <Card className="overflow-hidden border-white/10 p-2 sm:p-3">
+   421→                <div className="relative">
+   422→                  <canvas
+   423→                    ref={canvasRef}
+   424→                    className={`aspect-square w-full touch-none select-none ${armed ? 'cursor-crosshair' : 'cursor-cell'}`}
+   425→                    onPointerDown={onPointerDown}
+   426→                    onPointerMove={onPointerMove}
+   427→                    onPointerUp={onPointerUp}
+   428→                    onPointerCancel={onPointerUp}
+   429→                    onContextMenu={(e) => e.preventDefault()}
+   430→                    aria-label="Поле симуляции Lenia"
+   431→                  />
+   432→                  {armed && (
+   433→                    <div className="pointer-events-none absolute left-3 top-3 flex flex-wrap items-center gap-2">
+   434→                      <div className="rounded-full border border-emerald-500/40 bg-black/70 px-3 py-1 text-xs font-medium text-emerald-300 backdrop-blur">
+   435→                        «{armed.ru}» · клик — посадить{` `}
+   436→                        <span className="text-emerald-500/70">(Shift — несколько)</span>
+   437→                        {` · поворот ${rot}°`}
+   438→                      </div>
+   439→                      <div className="pointer-events-auto flex gap-1">
+   440→                        <button
+   441→                          onClick={() => setRot((r) => (r + 270) % 360)}
+   442→                          className="rounded-full border border-emerald-500/40 bg-black/70 p-1.5 text-emerald-300 backdrop-blur transition-colors hover:bg-emerald-950/60"
+   443→                          aria-label="Повернуть против часовой стрелки"
+   444→                        >
+   445→                          <RotateCcwSquare className="h-3.5 w-3.5" />
+   446→                        </button>
+   447→                        <button
+   448→                          onClick={() => setRot((r) => (r + 90) % 360)}
+   449→                          className="rounded-full border border-emerald-500/40 bg-black/70 p-1.5 text-emerald-300 backdrop-blur transition-colors hover:bg-emerald-950/60"
+   450→                          aria-label="Повернуть по часовой стрелке"
+   451→                        >
+   452→                          <RotateCwSquare className="h-3.5 w-3.5" />
+   453→                        </button>
+   454→                      </div>
+   455→                    </div>
+   456→                  )}
+   457→                </div>
+   458→              </Card>
+   459→
+   460→              {/* Toolbar */}
+   461→              <div className="mt-3 flex flex-wrap items-center gap-2">
+   462→                <Button
+   463→                  onClick={() => setRunning((r) => !r)}
+   464→                  variant={running ? 'secondary' : 'default'}
+   465→                  size="sm"
+   466→                  className="gap-1.5"
+   467→                  aria-label={running ? 'Пауза' : 'Продолжить'}
+   468→                >
+   469→                  {running ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+   470→                  {running ? 'Пауза' : 'Пуск'}
+   471→                </Button>
+   472→                <Button
+   473→                  onClick={() => {
+   474→                    if (!running) {
+   475→                      engineRef.current?.step();
+   476→                      simTimeRef.current += paramsRef.current.dt;
+   477→                    }
+   478→                  }}
+   479→                  variant="secondary"
+   480→                  size="sm"
+   481→                  className="gap-1.5"
+   482→                  disabled={running}
+   483→                  aria-label="Один шаг"
+   484→                >
+   485→                  <SkipForward className="h-4 w-4" />
+   486→                  Шаг
+   487→                </Button>
+   488→                <Button
+   489→                  onClick={() => engineRef.current?.randomize()}
+   490→                  variant="secondary"
+   491→                  size="sm"
+   492→                  className="gap-1.5"
+   493→                  aria-label="Случайное поле"
+   494→                >
+   495→                  <Dices className="h-4 w-4" />
+   496→                  Случайное
+   497→                </Button>
+   498→                <Button
+   499→                  onClick={() => engineRef.current?.clear()}
+   500→                  variant="secondary"
+   501→                  size="sm"
+   502→                  className="gap-1.5"
+   503→                  aria-label="Очистить поле"
+   504→                >
+   505→                  <Trash2 className="h-4 w-4" />
+   506→                  Очистить
+   507→                </Button>
+   508→                <Button
+   509→                  onClick={() => {
+   510→                    const eng = engineRef.current;
+   511→                    if (eng) seedPreset(presetId, eng);
+   512→                  }}
+   513→                  variant="secondary"
+   514→                  size="sm"
+   515→                  className="gap-1.5"
+   516→                  aria-label="Перезапустить сцену"
+   517→                >
+   518→                  <RotateCcw className="h-4 w-4" />
+   519→                  Сцену заново
+   520→                </Button>
+   521→
+   522→                <div className="ml-auto flex items-center gap-2 font-mono text-xs text-muted-foreground">
+   523→                  <span>t = {stats.t.toFixed(0)}</span>
+   524→                  <span className="text-emerald-500/60">·</span>
+   525→                  <span>M = {stats.mass.toFixed(0)}</span>
+   526→                  <span className="text-emerald-500/60">·</span>
+   527→                  <span>{stats.fps.toFixed(0)} FPS</span>
+   528→                </div>
+   529→              </div>
+   530→
+   531→              <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-3 rounded-lg border border-white/5 bg-white/[0.02] px-4 py-3">
+   532→                <div className="flex items-center gap-2">
+   533→                  <span className="whitespace-nowrap text-xs text-muted-foreground">Сцена</span>
+   534→                  <Select
+   535→                    value={presetId}
+   536→                    onValueChange={(v) => {
+   537→                      const eng = engineRef.current;
+   538→                      if (eng) seedPreset(v, eng);
+   539→                    }}
+   540→                  >
+   541→                    <SelectTrigger className="h-8 w-44" aria-label="Сцена-пресет">
+   542→                      <SelectValue />
+   543→                    </SelectTrigger>
+   544→                    <SelectContent>
+   545→                      {PRESETS.map((p) => (
+   546→                        <SelectItem key={p.id} value={p.id}>
+   547→                          {p.label}
+   548→                        </SelectItem>
+   549→                      ))}
+   550→                    </SelectContent>
+   551→                  </Select>
+   552→                </div>
+   553→                <div className="flex min-w-52 flex-1 items-center gap-3">
+   554→                  <span className="whitespace-nowrap text-xs text-muted-foreground">
+   555→                    Скорость ×{speed}
+   556→                  </span>
+   557→                  <Slider
+   558→                    value={[speed]}
+   559→                    onValueChange={([v]) => setSpeed(v)}
+   560→                    min={1}
+   561→                    max={8}
+   562→                    step={1}
+   563→                    aria-label="Скорость симуляции"
+   564→                  />
+   565→                </div>
+   566→                <div className="flex items-center gap-2">
+   567→                  <span className="whitespace-nowrap text-xs text-muted-foreground">Палитра</span>
+   568→                  <Select value={paletteId} onValueChange={setPaletteId}>
+   569→                    <SelectTrigger className="h-8 w-44" aria-label="Цветовая палитра">
+   570→                      <SelectValue />
+   571→                    </SelectTrigger>
+   572→                    <SelectContent>
+   573→                      {PALETTES.map((p: Palette) => (
+   574→                        <SelectItem key={p.id} value={p.id}>
+   575→                          {p.name}
+   576→                        </SelectItem>
+   577→                      ))}
+   578→                    </SelectContent>
+   579→                  </Select>
+   580→                </div>
+   581→              </div>
+   582→
+   583→              <div className="mt-2 flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-x-4">
+   584→                <Badge variant="outline" className="w-fit max-w-full truncate border-emerald-900/60 font-normal text-emerald-300/90">
+   585→                  физика мира: {physicsLabel}
+   586→                </Badge>
+   587→                <p className="min-w-0 flex-1 text-xs leading-relaxed text-muted-foreground">
+   588→                  {presetDesc}
+   589→                </p>
+   590→              </div>
+   591→
+   592→              <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+   593→                Кисть: тяните мышью — рисуете живое вещество, правая кнопка — стираете.
+   594→                Пробел — пауза, R — случайное поле, C — очистить, Q/E — поворот существа.
+   595→                Внимание: у каждого вида своя физика — существа «чужих» законов обычно
+   596→                погибают, это не баг, а суть Lenia.
+   597→              </p>
+   598→            </div>
+   599→
+   600→            {/* Side panel */}
+   601→            <Card className="h-fit border-white/10 p-4">
+   602→              <Tabs defaultValue="creatures">
+   603→                <TabsList className="grid w-full grid-cols-3">
+   604→                  <TabsTrigger value="creatures">Существа</TabsTrigger>
+   605→                  <TabsTrigger value="physics">Физика</TabsTrigger>
+   606→                  <TabsTrigger value="brush">Кисть</TabsTrigger>
+   607→                </TabsList>
+   608→
+   609→                <TabsContent value="creatures" className="mt-4">
+   610→                  <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
+   611→                    Кликните по существу, затем по полю — физика мира подстроится под него.
+   612→                    Колесо мыши или Q/E поворачивает существо перед посадкой.{' '}
+   613→                    <span className="text-amber-400/90">
+   614→                      Виды с разной физикой несовместимы: посадка «чужака» обрекает
+   615→                      прежних обитателей.
+   616→                    </span>
+   617→                  </p>
+   618→                  <ScrollArea className="max-h-[560px] pr-3">
+   619→                    <div className="grid grid-cols-2 gap-2">
+   620→                      {CREATURES.map((c) => (
+   621→                        <button
+   622→                          key={c.name}
+   623→                          onClick={() => armCreature(c)}
+   624→                          className={`group flex items-center gap-3 rounded-lg border p-2.5 text-left transition-colors ${
+   625→                            armed?.id === c.id
+   626→                              ? 'border-emerald-500/70 bg-emerald-950/40'
+   627→                              : 'border-white/10 bg-white/[0.02] hover:border-emerald-900/60 hover:bg-emerald-950/20'
+   628→                          }`}
+   629→                          aria-pressed={armed?.id === c.id}
+   630→                        >
+   631→                          <CreatureThumb creature={c} size={52} />
+   632→                          <span className="min-w-0">
+   633→                            <span className="block truncate text-sm font-semibold">{c.ru}</span>
+   634→                            <span className="block truncate text-[11px] italic text-muted-foreground">
+   635→                              {c.name}
+   636→                            </span>
+   637→                            <span className="mt-0.5 block truncate text-[10px] uppercase tracking-wide text-emerald-500/80">
+   638→                              {c.kindRu}
+   639→                              {c.speed >= 0.5 ? ` · ~${c.speed.toFixed(1)} кл/с` : ''}
+   640→                            </span>
+   641→                          </span>
+   642→                        </button>
+   643→                      ))}
+   644→                    </div>
+   645→                  </ScrollArea>
+   646→                  {armed && (
+   647→                    <p className="mt-3 rounded-md border border-emerald-900/40 bg-emerald-950/20 p-2.5 text-xs leading-relaxed text-emerald-200/90">
+   648→                      {armed.desc}
+   649→                    </p>
+   650→                  )}
+   651→                </TabsContent>
+   652→
+   653→                <TabsContent value="physics" className="mt-4 space-y-5">
+   654→                  <div>
+   655→                    <div className="mb-2 flex items-center justify-between">
+   656→                      <Label htmlFor="mu" className="text-xs">μ — центр роста</Label>
+   657→                      <span className="font-mono text-xs text-emerald-400">{params.m.toFixed(3)}</span>
+   658→                    </div>
+   659→                    <Slider
+   660→                      id="mu"
+   661→                      value={[params.m]}
+   662→                      onValueChange={([v]) => applyParams({ m: v })}
+   663→                      min={0.05}
+   664→                      max={0.45}
+   665→                      step={0.001}
+   666→                    />
+   667→                  </div>
+   668→                  <div>
+   669→                    <div className="mb-2 flex items-center justify-between">
+   670→                      <Label htmlFor="sigma" className="text-xs">σ — ширина роста</Label>
+   671→                      <span className="font-mono text-xs text-emerald-400">{params.s.toFixed(3)}</span>
+   672→                    </div>
+   673→                    <Slider
+   674→                      id="sigma"
+   675→                      value={[params.s]}
+   676→                      onValueChange={([v]) => applyParams({ s: v })}
+   677→                      min={0.005}
+   678→                      max={0.08}
+   679→                      step={0.001}
+   680→                    />
+   681→                  </div>
+   682→                  <div>
+   683→                    <div className="mb-2 flex items-center justify-between">
+   684→                      <Label htmlFor="R" className="text-xs">R — радиус ядра</Label>
+   685→                      <span className="font-mono text-xs text-emerald-400">{params.R}</span>
+   686→                    </div>
+   687→                    <Slider
+   688→                      id="R"
+   689→                      value={[params.R]}
+   690→                      onValueChange={([v]) => applyParams({ R: Math.round(v) })}
+   691→                      min={5}
+   692→                      max={30}
+   693→                      step={1}
+   694→                    />
+   695→                  </div>
+   696→                  <div>
+   697→                    <div className="mb-2 flex items-center justify-between">
+   698→                      <Label htmlFor="dt" className="text-xs">Δt — шаг времени</Label>
+   699→                      <span className="font-mono text-xs text-emerald-400">{params.dt.toFixed(3)}</span>
+   700→                    </div>
+   701→                    <Slider
+   702→                      id="dt"
+   703→                      value={[params.dt]}
+   704→                      onValueChange={([v]) => applyParams({ dt: v })}
+   705→                      min={0.02}
+   706→                      max={0.25}
+   707→                      step={0.005}
+   708→                    />
+   709→                  </div>
+   710→                  <div className="grid grid-cols-2 gap-3">
+   711→                    <div>
+   712→                      <Label className="text-xs">Ядро</Label>
+   713→                      <Select
+   714→                        value={String(params.kn)}
+   715→                        onValueChange={(v) => applyParams({ kn: Number(v) })}
+   716→                      >
+   717→                        <SelectTrigger className="mt-1.5 h-8 w-full" aria-label="Форма ядра">
+   718→                          <SelectValue />
+   719→                        </SelectTrigger>
+   720→                        <SelectContent>
+   721→                          {Object.entries(KERNEL_NAMES).map(([k, v]) => (
+   722→                            <SelectItem key={k} value={k}>
+   723→                              {v}
+   724→                            </SelectItem>
+   725→                          ))}
+   726→                        </SelectContent>
+   727→                      </Select>
+   728→                    </div>
+   729→                    <div>
+   730→                      <Label className="text-xs">Рост</Label>
+   731→                      <Select
+   732→                        value={String(params.gn)}
+   733→                        onValueChange={(v) => applyParams({ gn: Number(v) })}
+   734→                      >
+   735→                        <SelectTrigger className="mt-1.5 h-8 w-full" aria-label="Функция роста">
+   736→                          <SelectValue />
+   737→                        </SelectTrigger>
+   738→                        <SelectContent>
+   739→                          {Object.entries(GROWTH_NAMES).map(([k, v]) => (
+   740→                            <SelectItem key={k} value={k}>
+   741→                              {v}
+   742→                            </SelectItem>
+   743→                          ))}
+   744→                        </SelectContent>
+   745→                      </Select>
+   746→                    </div>
+   747→                  </div>
+   748→
+   749→                  <div className="grid grid-cols-2 gap-2">
+   750→                    <div>
+   751→                      <KernelPlot R={params.R} b={params.b} kn={params.kn} />
+   752→                    </div>
+   753→                    <div>
+   754→                      <GrowthPlot m={params.m} s={params.s} gn={params.gn} />
+   755→                    </div>
+   756→                  </div>
+   757→                  <p className="text-xs leading-relaxed text-muted-foreground">
+   758→                    Ползунки меняют законы природы на лету. Слишком большой Δt «взбалтывает»
+   759→                    мир, маленькая σ делает организмы хрупкими, а μ задаёт плотность, при
+   760→                    которой жизнь вообще возможна. Сдвинули — и вернуться к «родной» физике
+   761→                    вида можно, посадив его заново.
+   762→                  </p>
+   763→                </TabsContent>
+   764→
+   765→                <TabsContent value="brush" className="mt-4 space-y-5">
+   766→                  <div>
+   767→                    <div className="mb-2 flex items-center justify-between">
+   768→                      <Label htmlFor="brushR" className="text-xs">Радиус кисти</Label>
+   769→                      <span className="font-mono text-xs text-emerald-400">{brush.radius} кл.</span>
+   770→                    </div>
+   771→                    <Slider
+   772→                      id="brushR"
+   773→                      value={[brush.radius]}
+   774→                      onValueChange={([v]) => setBrush((b) => ({ ...b, radius: v }))}
+   775→                      min={2}
+   776→                      max={40}
+   777→                      step={1}
+   778→                    />
+   779→                  </div>
+   780→                  <div>
+   781→                    <div className="mb-2 flex items-center justify-between">
+   782→                      <Label htmlFor="brushS" className="text-xs">Сила</Label>
+   783→                      <span className="font-mono text-xs text-emerald-400">{brush.strength.toFixed(2)}</span>
+   784→                    </div>
+   785→                    <Slider
+   786→                      id="brushS"
+   787→                      value={[brush.strength]}
+   788→                      onValueChange={([v]) => setBrush((b) => ({ ...b, strength: v }))}
+   789→                      min={0.1}
+   790→                      max={1}
+   791→                      step={0.05}
+   792→                    />
+   793→                  </div>
+   794→                  <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.02] px-4 py-3">
+   795→                    <div className="flex items-center gap-2.5">
+   796→                      {brush.erase ? (
+   797→                        <Eraser className="h-4 w-4 text-amber-400" />
+   798→                      ) : (
+   799→                        <Brush className="h-4 w-4 text-emerald-400" />
+   800→                      )}
+   801→                      <div>
+   802→                        <p className="text-sm font-medium">{brush.erase ? 'Ластик' : 'Рисование'}</p>
+   803→                        <p className="text-[11px] text-muted-foreground">
+   804→                          {brush.erase ? 'стирает вещество с поля' : 'добавляет живое вещество'}
+   805→                        </p>
+   806→                      </div>
+   807→                    </div>
+   808→                    <Switch
+   809→                      checked={brush.erase}
+   810→                      onCheckedChange={(v) => setBrush((b) => ({ ...b, erase: v }))}
+   811→                      aria-label="Режим ластика"
+   812→                    />
+   813→                  </div>
+   814→                  <p className="text-xs leading-relaxed text-muted-foreground">
+   815→                    Порисуйте поверх существа — и посмотрите, как оно{' '}
+   816→                    <span className="text-emerald-300">самовосстанавливается</span>: Lenia-организмы
+   817→                    умеют залечивать раны, если повреждение не слишком велико.
+   818→                  </p>
+   819→                </TabsContent>
+   820→              </Tabs>
+   821→            </Card>
+   822→          </div>
+   823→        )}
+   824→
+   825→        <HowItWorks />
+   826→      </main>
+   827→
+   828→      <footer className="mt-auto border-t border-white/5">
+   829→        <div className="mx-auto flex w-full max-w-7xl flex-wrap items-center justify-between gap-2 px-4 py-5 text-xs text-muted-foreground">
+   830→          <span>
+   831→            Lenia — проект Bert Wang-Chak Chan · существа и формулы из оригинальной
+   832→            библиотеки
+   833→          </span>
+   834→          <span>
+   835→            Реконструкция: Next.js + WebGL2 · проверено эталонной симуляцией (NumPy)
+   836→          </span>
+   837→        </div>
+   838→      </footer>
+   839→    </div>
+   840→  );
+   841→}
+   842→
